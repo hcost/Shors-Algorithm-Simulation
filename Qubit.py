@@ -1,5 +1,8 @@
 import numpy as np
 import warnings
+import random
+import Gate
+
 warnings.filterwarnings('ignore')
 
 # Hadamard Gate
@@ -62,7 +65,7 @@ bell_state_names = ['phi_plus', 'phi_minus', 'psi_plus', 'psi_minus']
 # We assume use of the computational basis by default
 class Qubit(np.ndarray):
 
-    def __new__(cls, name=None, vec=(1, 0)):
+    def __new__(cls, name=None, vec=(1, 0), noise=0):
         """
         :param vec: a tuple of ALPHA and BETA, the amplitudes of states |0> and |1>, respectively
         :param shape: ensures the qubit is a 2D vector (i.e. sets the size of the numpy array to 2x1)
@@ -75,13 +78,26 @@ class Qubit(np.ndarray):
         beta = vec[1]
         return _make_qubit(alpha, beta)
 
-    def __init__(self, name=None, vec=(1, 0)):
+    def __init__(self, name=None, vec=(1, 0), noise=0):
         if name == 'plus' or name == '+':
             vec = (1 / np.sqrt(2), 1 / np.sqrt(2))
         if name == 'minus' or name == '-':
             vec = (1 / np.sqrt(2), -1 / np.sqrt(2))
         self.alpha = vec[0]
         self.beta = vec[1]
+        self.n = 1
+        if noise == 1:
+            self.noise = Gate.XNoise
+        elif noise == 2:
+            self.noise = Gate.YNoise
+        elif noise == 3:
+            self.noise = Gate.ZNoise
+        elif noise == 4:
+            self.noise = Gate.PauliNoise
+        elif noise == 5:
+            self.noise = Gate.DampingNoise
+        else:
+            self.noise = None
 
     def __mul__(self, matrix):
         x = np.matmul(self, matrix)[0]
@@ -100,6 +116,7 @@ class Qubit(np.ndarray):
                 ret += ' + '
         return ret
 
+    ### NOISELESS SINGLE-QUBIT METHODS ###
     def pauli(self, op):
         if op == 'X':
             p = np.matmul(self, X)
@@ -111,8 +128,11 @@ class Qubit(np.ndarray):
             raise ValueError('Argument must be either X, Y, or Z as string')
         return Qubit(vec=(p[0], p[1]))
 
-    def Hadamard(self):
-        p = np.matmul(self, H)
+    def Hadamard(self, noise_prob=0):
+        if self.noise is None:
+            p = np.matmul(self, H)
+        else:
+            p = np.matmul(self.Gate.Hadamard(self.noise(self.n, noise_prob)))
         return Qubit(vec=(p[0], p[1]))
 
     def measure(self):
@@ -124,15 +144,22 @@ class Qubit(np.ndarray):
 
 class Register(np.ndarray):
 
-    def __new__(cls, n=2, name=None, qubits=None, amplitudes=None, ket=True):
+    def __new__(cls, n=2, name=None, qubits=None, amplitudes=None, ket=True, noise=0):
         """
-        :param n: (OPTIONAL) 2 by default. Returns an n-qubit register initialized to |000...0>
-        :param name: (OPTIONAL) Passing in the name of a bell state gives that bell state. More names to come.
-        :param qubits: (OPTIONAL) Returns the register formed by taking the tensor product of all of the QUBIT
+        :param n: 2 by default. Returns an n-qubit register initialized to |000...0>
+        :param name: Passing in the name of a bell state gives that bell state. More names to come.
+        :param qubits: Returns the register formed by taking the tensor product of all of the QUBIT
                        objects passed through in the order they were given
-        :param amplitudes: (OPTIONAL) Returns a register with the amplitudes given. Length of AMPLITUDES must be
+        :param amplitudes: Returns a register with the amplitudes given. Length of AMPLITUDES must be
                            a power of two (raises ASSERTION ERROR) and its l2 norm must be equal to 1 (raises
                            ASSERTION ERROR)
+        :param ket: True/False. Whether the Register in question should be a ket or a bra
+        :param noise: See module GATE.PY for details.
+                        1: XNoise
+                        2: YNoise
+                        3: ZNoise
+                        4: PauliNoise
+                        5: DampingNoise
         :return: a new Register object
         """
         if name in bell_state_names:
@@ -143,12 +170,11 @@ class Register(np.ndarray):
             L = np.array(amplitudes)
             x = np.log2(L.size)
             assert x // 1 == x, 'The size of the register should be a power of 2.'
-            # assert np.linalg.norm(L) - 1 < 1e-9, 'The sum of the squared amplitudes should be 1'
             return np.asarray(amplitudes).view(Register)
         if name is None:
             return _make_register([(1, 0)] * n)
 
-    def __init__(self, n=2, name=None, qubits=None, amplitudes=None, ket=True):
+    def __init__(self, n=2, name=None, qubits=None, amplitudes=None, ket=True, noise=0):
         self.name = name
         self.n = n
         self.amplitudes = amplitudes
@@ -166,6 +192,19 @@ class Register(np.ndarray):
         if not self.ket:
             self.bra()
         self.amplitudes = np.asarray([i for i in self])
+
+        if noise == 1:
+            self.noise = Gate.XNoise
+        elif noise == 2:
+            self.noise = Gate.YNoise
+        elif noise == 3:
+            self.noise = Gate.ZNoise
+        elif noise == 4:
+            self.noise = Gate.PauliNoise
+        elif noise == 5:
+            self.noise = Gate.DampingNoise
+        else:
+            self.noise = None
 
     # Define multiplication of states
     # <x|y> is valid, |x><y| is valid, but multiplication of kets/bras is not, and scaling kets/bras is not
@@ -222,7 +261,7 @@ class Register(np.ndarray):
 
     # measure function for shor's; returns int
     def measure(self):
-        probs = [abs(x)**2 for x in self.amplitudes]
+        probs = [abs(x) ** 2 for x in self.amplitudes]
         sample = np.random.random()
         cumul_prob = 0
         for i in range(2 ** self.n):
@@ -290,12 +329,16 @@ class Register(np.ndarray):
         return Register(amplitudes=x)
 
     # Performs Walsh-Hadamard on the register
-    def walsh(self):
-        vec = self.reshape(2 ** self.n)
-        w = H
-        for i in range(self.n - 1):
-            w = np.kron(w, H)
-        return Register(amplitudes=np.around(np.matmul(w, vec), 9), ket=self.ket)
+    def walsh(self, noise_prob=0):
+        if self.noise is None:
+            vec = self.reshape(2 ** self.n)
+            w = H
+            for i in range(self.n - 1):
+                w = np.kron(w, H)
+            return Register(amplitudes=np.around(np.matmul(w, vec), 9), ket=self.ket)
+        else:
+            w = Gate.Walsh(self.n, self.noise(self.n, noise_prob))
+            return w.apply(self)
 
     # Quantum Fourier Transform operation
     def QFT(self):
@@ -308,7 +351,7 @@ class Register(np.ndarray):
             amps.append(total)
         amps = np.asarray(amps)
         amps *= const
-        return Register(amplitudes=amps, ket=self.ket)
+        return Register(amplitudes=amps, ket=self.ket, noise=self.noise)
 
     @property
     def purity(self):
